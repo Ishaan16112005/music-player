@@ -4,8 +4,77 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Glass UI Music Player</title>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables (provided by the Canvas environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        let userId = null; // Will be set after authentication
+        let isAuthReady = false; // Flag to ensure Firestore operations wait for auth
+
+        // Expose Firebase instances and userId to the global scope for use in the main script
+        window.firebaseApp = app;
+        window.firebaseDb = db;
+        window.firebaseAuth = auth;
+        window.firebaseUserId = userId; // Initial null, will be updated by onAuthStateChanged
+        window.firebaseIsAuthReady = isAuthReady; // Initial false, will be updated
+
+        // Expose Firestore functions directly
+        window.firebaseFirestore = {
+            doc: doc,
+            getDoc: getDoc,
+            setDoc: setDoc,
+            updateDoc: updateDoc,
+            collection: collection,
+            getDocs: getDocs
+        };
+
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                console.log("Authenticated with Firebase. User ID:", userId);
+            } else {
+                console.log("No user found, signing in anonymously...");
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        userId = auth.currentUser.uid;
+                        console.log("Signed in with custom token. User ID:", userId);
+                    } else {
+                        await signInAnonymously(auth);
+                        userId = auth.currentUser.uid;
+                        console.log("Signed in anonymously. User ID:", userId);
+                    }
+                } catch (error) {
+                    console.error("Firebase authentication error:", error);
+                    // Fallback: If anonymous sign-in fails, use a random ID. Data won't persist.
+                    userId = crypto.randomUUID();
+                    console.warn("Using a temporary, non-persistent user ID due to authentication failure:", userId);
+                }
+            }
+            window.firebaseUserId = userId;
+            window.firebaseIsAuthReady = true;
+            // Dispatch a custom event to notify the main script that auth is ready
+            document.dispatchEvent(new CustomEvent('firebaseAuthReady'));
+        });
+    </script>
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsmediatags for reading audio metadata -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
+    <!-- Inter Font -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         body {
@@ -189,6 +258,76 @@
         .playlist-item.drag-over {
             border-bottom: 2px solid #a78bfa; /* Indicator for drop position */
         }
+
+        /* Loading indicator */
+        #loading-indicator {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 15px 30px;
+            border-radius: 10px;
+            z-index: 100;
+            display: none; /* Hidden by default */
+        }
+
+        /* Modal for Artist Info */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 50; /* Above other panels */
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal-content {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(30px);
+            -webkit-backdrop-filter: blur(30px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 15px;
+            padding: 25px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+            color: white;
+            position: relative;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+
+        .modal-close-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            color: white;
+            cursor: pointer;
+            padding: 5px;
+            border-radius: 50%;
+            transition: background-color 0.2s ease;
+        }
+
+        .modal-close-btn:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white overflow-hidden">
@@ -228,6 +367,12 @@
                         <span class="slider"></span>
                     </label>
                 </div>
+                <!-- Load Music button moved here -->
+                <button id="load-music-btn" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg transition duration-300 flex items-center justify-center space-x-2 mt-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                    <span>Load Music</span>
+                </button>
+                <input type="file" id="file-input" multiple accept="audio/*" class="hidden">
             </div>
 
             <!-- New: Top Lists Panel -->
@@ -250,12 +395,12 @@
                 <div class="text-center">
                     <h2 id="song-title" class="text-2xl font-bold">No Song Loaded</h2>
                     <p id="song-artist" class="text-md text-gray-300">Select music to play</p>
+                    <!-- New: Artist Info Button -->
+                    <button id="artist-info-btn" class="mt-4 bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 flex items-center justify-center space-x-2 mx-auto">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                        <span>✨ Artist Info</span>
+                    </button>
                 </div>
-                   <button id="load-music-btn" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg transition duration-300 flex items-center justify-center space-x-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
-                    <span>Load Music</span>
-                </button>
-                <input type="file" id="file-input" multiple accept="audio/*" class="hidden">
             </div>
 
             <!-- Right Side: Playlist & Controls -->
@@ -284,6 +429,11 @@
 
                     <!-- Buttons -->
                     <div class="flex items-center justify-center space-x-4 md:space-x-6 mt-4">
+                        <!-- Shuffle Button -->
+                        <button id="shuffle-btn" class="player-button p-3 rounded-full">
+                            <svg id="shuffle-icon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+                        </button>
+
                         <button id="prev-btn" class="player-button p-3 rounded-full">
                             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><polygon points="11 5 6 9 11 13 11 5"/><polygon points="18 5 13 9 18 13 18 5"/></svg>
                         </button>
@@ -293,6 +443,13 @@
                         </button>
                         <button id="next-btn" class="player-button p-3 rounded-full">
                             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 5 18 9 13 13 13 5"/><polygon points="6 5 11 9 6 13 6 5"/></svg>
+                        </button>
+
+                        <!-- Repeat Button -->
+                        <button id="repeat-btn" class="player-button p-3 rounded-full">
+                            <svg id="repeat-icon-off" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400"><polyline points="17 1 21 5 17 9"/><path d="M21 5H3v14"/></svg>
+                            <svg id="repeat-icon-all" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-indigo-400 hidden"><polyline points="17 1 21 5 17 9"/><path d="M21 5H3v14"/></svg>
+                            <svg id="repeat-icon-one" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-indigo-400 hidden"><path d="M17 1l4 4-4 4"/><path d="M21 5H3v14"/><path d="M10 12v6"/><path d="M7 15l3 3 3-3"/></svg>
                         </button>
 
                         <!-- Volume Control -->
@@ -311,10 +468,30 @@
 
     <audio id="audio-player" class="hidden"></audio>
 
+    <div id="loading-indicator">Loading data...</div>
+
+    <!-- Artist Info Modal -->
+    <div id="artist-info-modal" class="modal-overlay">
+        <div class="modal-content">
+            <button class="modal-close-btn" id="artist-info-close-btn">&times;</button>
+            <h3 class="text-xl font-bold mb-4" id="modal-artist-name"></h3>
+            <div id="modal-artist-info" class="text-base leading-relaxed"></div>
+        </div>
+    </div>
+
     <script>
         document.addEventListener('DOMContentLoaded', () => {
+            // --- Firebase Globals (from the module script above) ---
+            const db = window.firebaseDb;
+            const auth = window.firebaseAuth;
+            // Access Firestore functions directly from window.firebaseFirestore
+            const { doc, getDoc, setDoc, updateDoc, collection, getDocs } = window.firebaseFirestore;
+
+            let userId = null; // Will be set after authentication
+            let isAuthReady = false; // Flag to ensure Firestore operations wait for auth
+
             // --- Element Selection ---
-            const body = document.body; // Reference to the body
+            const body = document.body;
             const fileInput = document.getElementById('file-input');
             const loadMusicBtn = document.getElementById('load-music-btn');
             const audioPlayer = document.getElementById('audio-player');
@@ -347,80 +524,285 @@
             const darkModeToggle = document.getElementById('dark-mode-toggle');
             const lightModeToggle = document.getElementById('light-mode-toggle');
 
-            // New elements for Top Lists button and panel
             const topListsBtn = document.getElementById('top-lists-btn');
             const topListsPanel = document.getElementById('top-lists-panel');
             const topSongsList = document.getElementById('top-songs-list');
             const topArtistsList = document.getElementById('top-artists-list');
+            const loadingIndicator = document.getElementById('loading-indicator');
+
+            const artistInfoBtn = document.getElementById('artist-info-btn');
+            const artistInfoModal = document.getElementById('artist-info-modal');
+            const artistInfoCloseBtn = document.getElementById('artist-info-close-btn');
+            const modalArtistName = document.getElementById('modal-artist-name');
+            const modalArtistInfo = document.getElementById('modal-artist-info');
+
+            const repeatBtn = document.getElementById('repeat-btn');
+            const repeatIconOff = document.getElementById('repeat-icon-off');
+            const repeatIconAll = document.getElementById('repeat-icon-all');
+            const repeatIconOne = document.getElementById('repeat-icon-one');
+            const shuffleBtn = document.getElementById('shuffle-btn');
+            const shuffleIcon = document.getElementById('shuffle-icon');
 
 
             let playlist = [];
             let currentTrackIndex = 0;
-            let isPlaying = false;
-            let playWhenReady = false; // Flag to handle auto-play after load
+            let isPlaying = false; // Controls the intended playing state
 
-            // Store current mode preference
-            let currentMode = 'dynamic'; // 'dynamic', 'dark', 'light'
+            let currentMode = 'dynamic';
 
-            // Drag and Drop variables
-            let draggedItem = null; // Stores the HTML element being dragged
-            let draggedItemIndex = -1; // Stores the original index of the dragged item
+            let draggedItem = null;
+            let draggedItemIndex = -1;
 
-            // New: Map to store artist play counts
             let artistPlayCounts = new Map();
 
+            let repeatMode = 0; // 0: no repeat, 1: repeat all, 2: repeat one
+            let isShuffling = false;
+            let shuffledPlaylistIndices = [];
+            let originalPlaylistOrder = [];
+
+            // --- Firebase Data Persistence Functions ---
+            const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const USER_DATA_DOC_PATH = (uid) => `artifacts/${APP_ID}/users/${uid}/musicPlayerState/data`;
+
+            async function showLoading(message = "Loading...") {
+                if (loadingIndicator) {
+                    loadingIndicator.textContent = message;
+                    loadingIndicator.style.display = 'block';
+                }
+            }
+
+            async function hideLoading() {
+                if (loadingIndicator) loadingIndicator.style.display = 'none';
+            }
+
+            async function saveUserData() {
+                if (!isAuthReady || !userId || !db) {
+                    console.warn("Firebase not ready or userId not available. Cannot save data.");
+                    return;
+                }
+                try {
+                    const dataToSave = {
+                        playlist: playlist.map(song => ({
+                            id: song.id,
+                            title: song.title,
+                            rawArtist: song.rawArtist,
+                            displayArtist: song.displayArtist,
+                            albumArt: song.albumArt,
+                            playCount: song.playCount
+                        })),
+                        artistPlayCounts: Object.fromEntries(artistPlayCounts),
+                        currentMode: currentMode,
+                        currentTrackIndex: currentTrackIndex,
+                        repeatMode: repeatMode,
+                        isShuffling: isShuffling,
+                    };
+                    const docRef = doc(db, USER_DATA_DOC_PATH(userId));
+                    await setDoc(docRef, dataToSave, { merge: true });
+                    console.log("User data saved successfully!");
+                } catch (e) {
+                    console.error("Error saving user data:", e);
+                }
+            }
+
+            async function loadUserData() {
+                if (!isAuthReady || !userId || !db) {
+                    console.warn("Firebase not ready or userId not available. Cannot load data.");
+                    return;
+                }
+                showLoading("Loading saved data...");
+                try {
+                    const docRef = doc(db, USER_DATA_DOC_PATH(userId));
+                    const docSnap = await getDoc(docRef);
+
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        console.log("User data loaded:", data);
+
+                        playlist = data.playlist || [];
+                        currentTrackIndex = data.currentTrackIndex || 0;
+                        currentMode = data.currentMode || 'dynamic';
+                        repeatMode = data.repeatMode !== undefined ? data.repeatMode : 0;
+                        isShuffling = data.isShuffling !== undefined ? data.isShuffling : false;
+
+                        artistPlayCounts = new Map(Object.entries(data.artistPlayCounts || {}));
+
+                        setAppMode(currentMode);
+                        updatePlaylistUI();
+                        updateTopListsUI();
+                        updateRepeatButtonUI();
+                        updateShuffleButtonUI();
+
+                        if (isShuffling && playlist.length > 0) {
+                            originalPlaylistOrder = Array.from({ length: playlist.length }, (_, i) => i);
+                            shuffledPlaylistIndices = shuffleArray(Array.from({ length: playlist.length }, (_, i) => i));
+                            const currentSongId = playlist[currentTrackIndex].id;
+                            const newCurrentIndexInShuffled = shuffledPlaylistIndices.findIndex(idx => playlist[idx].id === currentSongId);
+                            if (newCurrentIndexInShuffled !== -1) {
+                                currentTrackIndex = newCurrentIndexInShuffled;
+                            } else {
+                                currentTrackIndex = shuffledPlaylistIndices[0] || 0;
+                            }
+                        } else {
+                            originalPlaylistOrder = Array.from({ length: playlist.length }, (_, i) => i);
+                            shuffledPlaylistIndices = [];
+                        }
+
+
+                        if (playlist.length > 0 && currentTrackIndex < playlist.length) {
+                            loadTrack(currentTrackIndex, false);
+                        } else {
+                            if (playlistPlaceholder) playlistPlaceholder.style.display = 'flex';
+                            if (songTitle) songTitle.textContent = 'No Song Loaded';
+                            if (songArtist) songArtist.textContent = 'Select music to play';
+                            if (albumArt) albumArt.src = 'https://placehold.co/256x256/1a1a1a/FFFFFF?text=Music';
+                        }
+                        if (darkModeToggle) darkModeToggle.checked = (currentMode === 'dark');
+                        if (lightModeToggle) lightModeToggle.checked = (currentMode === 'light');
+
+                    } else {
+                        console.log("No user data found in Firestore. Starting fresh.");
+                        saveUserData();
+                    }
+                } catch (e) {
+                    console.error("Error loading user data:", e);
+                } finally {
+                    hideLoading();
+                }
+            }
+
+            // --- LLM Integration ---
+            async function getArtistInfo(artistName) {
+                showLoading(`Getting info for ${artistName}...`);
+                try {
+                    const prompt = `Provide a brief biography or some interesting facts about the music artist "${artistName}". Keep it concise, around 3-5 sentences.`;
+                    let chatHistory = [];
+                    chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+                    const payload = { contents: chatHistory };
+                    const apiKey = "";
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const result = await response.json();
+                    if (result.candidates && result.candidates.length > 0 &&
+                        result.candidates[0].content && result.candidates[0].content.parts &&
+                        result.candidates[0].content.parts.length > 0) {
+                        const text = result.candidates[0].content.parts[0].text;
+                        return text;
+                    } else {
+                        console.error("LLM response structure unexpected:", result);
+                        return "Could not retrieve artist information.";
+                    }
+                } catch (error) {
+                    console.error("Error calling Gemini API:", error);
+                    return "Failed to fetch artist information. Please try again later.";
+                } finally {
+                    hideLoading();
+                }
+            }
+
+            // --- Utility for Shuffle ---
+            function shuffleArray(array) {
+                for (let i = array.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [array[i], array[j]] = [array[j], array[i]];
+                }
+                return array;
+            }
+
             // --- Event Listeners ---
+            document.addEventListener('firebaseAuthReady', () => {
+                userId = window.firebaseUserId;
+                isAuthReady = window.firebaseIsAuthReady;
+                loadUserData();
+            });
+
             loadMusicBtn.addEventListener('click', () => fileInput.click());
             fileInput.addEventListener('change', handleFileSelect);
             playPauseBtn.addEventListener('click', togglePlayPause);
             prevBtn.addEventListener('click', playPrevious);
             nextBtn.addEventListener('click', playNext);
             audioPlayer.addEventListener('timeupdate', updateProgress);
-            audioPlayer.addEventListener('ended', playNext);
+            audioPlayer.addEventListener('ended', handleSongEnd);
+            // Modified loadedmetadata listener
             audioPlayer.addEventListener('loadedmetadata', () => {
                 if (durationEl) durationEl.textContent = formatTime(audioPlayer.duration);
-                // If a track was loaded with the intention to play, play it now
-                if (playWhenReady) {
-                    playSong();
-                    playWhenReady = false; // Reset the flag
+                // If it was *intended* to play, and loadedmetadata fires, try playing again
+                if (isPlaying && audioPlayer.paused) { // Check if it's supposed to be playing but is paused
+                    audioPlayer.play().catch(e => {
+                        console.warn("Autoplay blocked after loadedmetadata, user interaction needed:", e);
+                        // Keep isPlaying true, but visually show paused if it truly failed to play
+                        isPlaying = false; // Set to false if playback truly fails
+                        if (playIcon) playIcon.classList.remove('hidden');
+                        if (pauseIcon) pauseIcon.classList.add('hidden');
+                    });
                 }
-                // Update background if not in fixed mode
                 if (currentMode === 'dynamic' && playlist[currentTrackIndex] && playlist[currentTrackIndex].albumArt) {
                     if (appBackground) appBackground.style.backgroundImage = `url('${playlist[currentTrackIndex].albumArt}')`;
                 }
             });
+
             progressContainer.addEventListener('click', setProgress);
             volumeSlider.addEventListener('input', handleVolumeChange);
             volumeBtn.addEventListener('click', toggleMute);
 
-            // Settings button click to toggle panel
             settingsBtn.addEventListener('click', (event) => {
                 if (settingsPanel) {
                     settingsPanel.classList.toggle('show');
-                    settingsPanel.classList.toggle('hidden'); // Toggle hidden class for initial display
+                    settingsPanel.classList.toggle('hidden');
                 }
-                if (topListsPanel) { // Close top lists panel if open
+                if (topListsPanel) {
                     topListsPanel.classList.remove('show');
                     topListsPanel.classList.add('hidden');
                 }
-                event.stopPropagation(); // Prevent click from immediately closing if clicking outside
+                if (artistInfoModal) {
+                    artistInfoModal.classList.remove('show');
+                }
+                event.stopPropagation();
             });
 
-            // New: Top Lists button click to toggle panel
             topListsBtn.addEventListener('click', (event) => {
                 if (topListsPanel) {
                     topListsPanel.classList.toggle('show');
-                    topListsPanel.classList.toggle('hidden'); // Toggle hidden class for initial display
+                    topListsPanel.classList.toggle('hidden');
                 }
-                if (settingsPanel) { // Close settings panel if open
+                if (settingsPanel) {
                     settingsPanel.classList.remove('show');
                     settingsPanel.classList.add('hidden');
                 }
-                event.stopPropagation(); // Prevent click from immediately closing if clicking outside
+                if (artistInfoModal) {
+                    artistInfoModal.classList.remove('show');
+                }
+                event.stopPropagation();
             });
 
+            artistInfoBtn.addEventListener('click', async () => {
+                if (playlist.length === 0 || !playlist[currentTrackIndex] || playlist[currentTrackIndex].displayArtist === 'Unknown Artist') {
+                    alert("Please load a song with a known artist to get information.");
+                    return;
+                }
 
-            // Close panels when clicking outside of them
+                const artistName = playlist[currentTrackIndex].displayArtist;
+                if (modalArtistName) modalArtistName.textContent = artistName;
+                if (modalArtistInfo) modalArtistInfo.textContent = "Loading artist information...";
+
+                if (settingsPanel) { settingsPanel.classList.remove('show'); settingsPanel.classList.add('hidden'); }
+                if (topListsPanel) { topListsPanel.classList.remove('show'); topListsPanel.classList.add('hidden'); }
+
+                if (artistInfoModal) artistInfoModal.classList.add('show');
+
+                const info = await getArtistInfo(artistName);
+                if (modalArtistInfo) modalArtistInfo.textContent = info;
+            });
+
+            artistInfoCloseBtn.addEventListener('click', () => {
+                if (artistInfoModal) artistInfoModal.classList.remove('show');
+            });
+
             document.addEventListener('click', (event) => {
                 if (settingsPanel && !settingsPanel.contains(event.target) && settingsBtn && !settingsBtn.contains(event.target)) {
                     settingsPanel.classList.remove('show');
@@ -430,67 +812,89 @@
                     topListsPanel.classList.remove('show');
                     topListsPanel.classList.add('hidden');
                 }
+                if (artistInfoModal && artistInfoModal.classList.contains('show') && !artistInfoModal.contains(event.target) && !artistInfoBtn.contains(event.target)) {
+                    artistInfoModal.classList.remove('show');
+                }
             });
 
-            // Dark Mode Toggle
             darkModeToggle.addEventListener('change', () => {
                 if (darkModeToggle.checked) {
-                    if (lightModeToggle) lightModeToggle.checked = false; // Ensure light mode is off
+                    if (lightModeToggle) lightModeToggle.checked = false;
                     setAppMode('dark');
                 } else {
-                    // If dark mode is turned off, revert to dynamic unless light mode is on
                     if (lightModeToggle && !lightModeToggle.checked) {
                         setAppMode('dynamic');
                     }
                 }
+                saveUserData();
             });
 
-            // Light Mode Toggle
             lightModeToggle.addEventListener('change', () => {
                 if (lightModeToggle.checked) {
-                    if (darkModeToggle) darkModeToggle.checked = false; // Ensure dark mode is off
+                    if (darkModeToggle) darkModeToggle.checked = false;
                     setAppMode('light');
                 } else {
-                    // If light mode is turned off, revert to dynamic unless dark mode is on
                     if (darkModeToggle && !darkModeToggle.checked) {
                         setAppMode('dynamic');
                     }
                 }
+                saveUserData();
             });
 
-            // --- Drag and Drop Event Listeners (Delegated to playlistElement) ---
+            repeatBtn.addEventListener('click', async () => {
+                repeatMode = (repeatMode + 1) % 3;
+                updateRepeatButtonUI();
+                await saveUserData();
+            });
+
+            shuffleBtn.addEventListener('click', async () => {
+                isShuffling = !isShuffling;
+                if (isShuffling) {
+                    originalPlaylistOrder = Array.from({ length: playlist.length }, (_, i) => i);
+                    shuffledPlaylistIndices = shuffleArray(Array.from({ length: playlist.length }, (_, i) => i));
+                    const currentSongId = playlist[currentTrackIndex].id;
+                    const newCurrentIndexInShuffled = shuffledPlaylistIndices.findIndex(idx => playlist[idx].id === currentSongId);
+                    if (newCurrentIndexInShuffled !== -1) {
+                        currentTrackIndex = newCurrentIndexInShuffled;
+                    } else {
+                        currentTrackIndex = shuffledPlaylistIndices[0] || 0;
+                    }
+                } else {
+                    const currentSongId = playlist[currentTrackIndex].id;
+                    currentTrackIndex = originalPlaylistOrder.findIndex(idx => playlist[idx].id === currentSongId);
+                    if (currentTrackIndex === -1) {
+                        currentTrackIndex = 0;
+                    }
+                    shuffledPlaylistIndices = [];
+                }
+                updatePlaylistUI();
+                updateShuffleButtonUI();
+                await saveUserData();
+            });
+
+
+            // --- Drag and Drop Event Listeners ---
             playlistElement.addEventListener('dragstart', (e) => {
                 const targetItem = e.target.closest('.playlist-item');
                 if (targetItem) {
                     draggedItem = targetItem;
                     draggedItemIndex = parseInt(targetItem.dataset.index);
                     e.dataTransfer.effectAllowed = 'move';
-                    e.dataTransfer.setData('text/html', targetItem.innerHTML); // Required for Firefox
+                    e.dataTransfer.setData('text/html', targetItem.innerHTML);
                     setTimeout(() => {
                         targetItem.classList.add('dragging');
-                    }, 0); // Add class after dragstart event finishes to avoid ghost image issues
+                    }, 0);
                 }
             });
 
             playlistElement.addEventListener('dragover', (e) => {
-                e.preventDefault(); // Necessary to allow dropping
+                e.preventDefault();
                 const targetItem = e.target.closest('.playlist-item');
                 if (targetItem && targetItem !== draggedItem) {
-                    const boundingBox = targetItem.getBoundingClientRect();
-                    const offset = e.clientY - boundingBox.top;
-                    const isAbove = offset < boundingBox.height / 2;
-
-                    // Remove drag-over from all items first
                     document.querySelectorAll('.playlist-item').forEach(item => {
                         item.classList.remove('drag-over');
                     });
-
-                    // Add drag-over to the target item based on position
-                    if (isAbove) {
-                        targetItem.classList.add('drag-over');
-                    } else {
-                        targetItem.classList.add('drag-over'); // For simplicity, just highlight the target
-                    }
+                    targetItem.classList.add('drag-over');
                 }
             });
 
@@ -501,36 +905,44 @@
                 }
             });
 
-            playlistElement.addEventListener('drop', (e) => {
+            playlistElement.addEventListener('drop', async (e) => {
                 e.preventDefault();
                 const targetItem = e.target.closest('.playlist-item');
                 if (draggedItem && targetItem && targetItem !== draggedItem) {
                     const dropTargetIndex = parseInt(targetItem.dataset.index);
 
-                    // Remove drag-over from all items
                     document.querySelectorAll('.playlist-item').forEach(item => {
                         item.classList.remove('drag-over');
                     });
 
-                    // Perform the reordering in the playlist array
                     const [movedSong] = playlist.splice(draggedItemIndex, 1);
                     playlist.splice(dropTargetIndex, 0, movedSong);
 
-                    // Adjust currentTrackIndex if the currently playing song was moved
-                    if (currentTrackIndex === draggedItemIndex) {
-                        currentTrackIndex = dropTargetIndex;
-                    } else if (currentTrackIndex > draggedItemIndex && currentTrackIndex <= dropTargetIndex) {
-                        currentTrackIndex--;
-                    } else if (currentTrackIndex < draggedItemIndex && currentTrackIndex >= dropTargetIndex) {
-                        currentTrackIndex++;
+                    if (isShuffling) {
+                        const currentSongId = playlist[currentTrackIndex].id;
+                        shuffledPlaylistIndices = shuffleArray(Array.from({ length: playlist.length }, (_, i) => i));
+                        const newCurrentIndexInShuffled = shuffledPlaylistIndices.findIndex(idx => playlist[idx].id === currentSongId);
+                        if (newCurrentIndexInShuffled !== -1) {
+                            currentTrackIndex = newCurrentIndexInShuffled;
+                        } else {
+                            currentTrackIndex = shuffledPlaylistIndices[0] || 0;
+                        }
+                    } else {
+                        if (currentTrackIndex === draggedItemIndex) {
+                            currentTrackIndex = dropTargetIndex;
+                        } else if (currentTrackIndex > draggedItemIndex && currentTrackIndex <= dropTargetIndex) {
+                            currentTrackIndex--;
+                        } else if (currentTrackIndex < draggedItemIndex && currentTrackIndex >= dropTargetIndex) {
+                            currentTrackIndex++;
+                        }
                     }
 
-                    updatePlaylistUI(); // Re-render the UI to reflect new order
+                    updatePlaylistUI();
+                    await saveUserData();
                 }
             });
 
             playlistElement.addEventListener('dragend', () => {
-                // Clean up dragging classes from all items
                 document.querySelectorAll('.playlist-item').forEach(item => {
                     item.classList.remove('dragging');
                     item.classList.remove('drag-over');
@@ -542,34 +954,28 @@
 
             // --- Initialization ---
             if (audioPlayer && volumeSlider) audioPlayer.volume = volumeSlider.value;
-            // Set initial mode on load
-            setAppMode('dynamic'); // Start with dynamic background
-            updateTopListsUI(); // Initial call to display placeholders for top lists
 
             // --- Mode Management ---
             function setAppMode(mode) {
                 currentMode = mode;
                 if (body) body.classList.remove('bg-gray-900', 'bg-black', 'bg-white', 'text-white', 'text-black');
 
-                // Reset app background visibility and image
                 if (appBackground) {
                     appBackground.classList.remove('hide-dynamic-bg');
-                    appBackground.style.backgroundImage = ''; // Clear explicit background image
+                    appBackground.style.backgroundImage = '';
                 }
 
                 if (mode === 'dark') {
                     if (body) body.classList.add('bg-black', 'text-white');
-                    if (appBackground) appBackground.classList.add('hide-dynamic-bg'); // Hide dynamic background
+                    if (appBackground) appBackground.classList.add('hide-dynamic-bg');
                 } else if (mode === 'light') {
                     if (body) body.classList.add('bg-white', 'text-black');
-                    if (appBackground) appBackground.classList.add('hide-dynamic-bg'); // Hide dynamic background
+                    if (appBackground) appBackground.classList.add('hide-dynamic-bg');
                 } else { // 'dynamic'
                     if (body) body.classList.add('bg-gray-900', 'text-white');
-                    // Restore dynamic background if a track is loaded
                     if (appBackground && playlist.length > 0 && playlist[currentTrackIndex] && playlist[currentTrackIndex].albumArt) {
                         appBackground.style.backgroundImage = `url('${playlist[currentTrackIndex].albumArt}')`;
                     } else if (appBackground) {
-                        // Default dynamic background if no music loaded
                         appBackground.style.backgroundImage = `url('https://placehold.co/1920x1080/000000/FFFFFF?text=Load+Music')`;
                     }
                 }
@@ -583,16 +989,15 @@
                         if (mode === 'light') {
                             el.style.background = 'rgba(0, 0, 0, 0.05)';
                             el.style.borderColor = 'rgba(0, 0, 0, 0.1)';
-                            el.style.color = '#333'; // Set text color for glass elements in light mode
+                            el.style.color = '#333';
                         } else {
                             el.style.background = 'rgba(255, 255, 255, 0.1)';
                             el.style.borderColor = 'rgba(255, 255, 255, 0.2)';
-                            el.style.color = '#fff'; // Set text color for glass elements in dark/dynamic mode
+                            el.style.color = '#fff';
                         }
                     }
                 });
 
-                // Handle body text color explicitly
                 if (body) {
                     if (mode === 'light') {
                         body.classList.remove('text-white');
@@ -603,7 +1008,20 @@
                     }
                 }
 
-                // Specific adjustments for elements that might not inherit from body or .glass
+                const allTextElements = document.querySelectorAll('h1, h2, h3, h4, p, span, li, button');
+                allTextElements.forEach(el => {
+                    if (el.classList.contains('bg-indigo-500') || el.closest('.player-button') || el.closest('.modal-content')) {
+                        return;
+                    }
+                    if (mode === 'light') {
+                        el.classList.remove('text-white', 'text-gray-300', 'text-gray-400', 'text-gray-500');
+                        el.classList.add('text-black');
+                    } else {
+                        el.classList.remove('text-black', 'text-gray-700', 'text-gray-600');
+                        el.classList.add('text-white');
+                    }
+                });
+
                 if (songArtist) {
                     if (mode === 'light') {
                         songArtist.classList.remove('text-gray-300');
@@ -612,20 +1030,15 @@
                         songArtist.classList.remove('text-gray-700');
                         songArtist.classList.add('text-gray-300');
                     }
-                } else {
-                    console.error("songArtist element is null in updatePlayerGlassEffect.");
                 }
                 
-                // Playlist element itself (for any direct text content, though children are handled below)
-                if (playlistElement) {
-                    if (mode === 'light') {
-                        playlistElement.style.color = '#333'; // Base color for playlist text
-                    } else {
-                        playlistElement.style.color = '#fff'; // Base color for playlist text
+                document.querySelectorAll('.playlist .text-sm').forEach(p => {
+                    if (p) {
+                        if (mode === 'light') p.classList.replace('text-gray-400', 'text-gray-600');
+                        else p.classList.replace('text-gray-600', 'text-gray-400');
                     }
-                }
+                });
 
-                // Update specific text elements (progress times, placeholder)
                 if (currentTimeEl) {
                     if (mode === 'light') currentTimeEl.classList.replace('text-gray-400', 'text-gray-600');
                     else currentTimeEl.classList.replace('text-gray-600', 'text-gray-400');
@@ -640,7 +1053,6 @@
                     else placeholder.classList.replace('text-gray-600', 'text-gray-400');
                 }
                 
-                // Top lists UL elements
                 if (topSongsList) {
                     if (mode === 'light') topSongsList.classList.replace('text-gray-300', 'text-gray-700');
                     else topSongsList.classList.replace('text-gray-700', 'text-gray-300');
@@ -650,101 +1062,104 @@
                     else topArtistsList.classList.replace('text-gray-700', 'text-gray-300');
                 }
 
-                // Top lists individual LI items
-                if (topSongsList) topSongsList.querySelectorAll('li').forEach(li => {
-                    if (li) {
-                        if (mode === 'light') li.classList.replace('text-gray-300', 'text-gray-700');
-                        else li.classList.replace('text-gray-700', 'text-gray-300');
+                if (modalArtistName) {
+                    if (mode === 'light') {
+                        modalArtistName.style.color = '#333';
+                    } else {
+                        modalArtistName.style.color = '#fff';
                     }
-                });
-                if (topArtistsList) topArtistsList.querySelectorAll('li').forEach(li => {
-                    if (li) {
-                        if (mode === 'light') li.classList.replace('text-gray-300', 'text-gray-700');
-                        else li.classList.replace('text-gray-700', 'text-gray-300');
+                }
+                if (modalArtistInfo) {
+                    if (mode === 'light') {
+                        modalArtistInfo.style.color = '#333';
+                    } else {
+                        modalArtistInfo.style.color = '#fff';
                     }
-                });
+                }
             }
 
 
             // --- File Handling ---
-            function handleFileSelect(event) {
+            async function handleFileSelect(event) {
                 const files = event.target.files;
                 if (files.length === 0) return;
 
                 if (playlistPlaceholder) playlistPlaceholder.style.display = 'none';
-                if (playlistElement) playlistElement.innerHTML = ''; // Clear existing playlist
+                if (playlistElement) playlistElement.innerHTML = '';
                 playlist = [];
-                artistPlayCounts = new Map(); // Reset artist play counts when new files are loaded
+                artistPlayCounts = new Map();
                 
-                Array.from(files).forEach((file, index) => {
+                const newSongs = [];
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
                     const song = {
+                        id: `track-${Date.now()}-${i}`,
                         file: file,
                         url: URL.createObjectURL(file),
                         title: file.name.replace(/\.[^/.]+$/, ""),
-                        rawArtist: 'Unknown Artist', // Store original for counting all artists
-                        displayArtist: 'Unknown Artist', // Default for display
+                        rawArtist: 'Unknown Artist',
+                        displayArtist: 'Unknown Artist',
                         albumArt: 'https://placehold.co/256x256/1a1a1a/FFFFFF?text=Music',
-                        id: `track-${index}`, // Assign a unique ID for drag-and-drop
-                        playCount: 0 // Initialize play count for each song
+                        playCount: 0
                     };
-                    playlist.push(song);
-                    
-                    window.jsmediatags.read(file, {
-                        onSuccess: (tag) => {
-                            song.title = tag.tags.title || tag.tags.album || song.title; // Prioritize title, then album
-                            song.rawArtist = tag.tags.artist || 'Unknown Artist'; // Keep full artist string for counting
+                    newSongs.push(song);
 
-                            // Determine display artist: Prioritize main artist if "feat." or "ft." is present,
-                            // otherwise take the first artist if multiple are separated by comma/semicolon.
-                            let displayArtist = song.rawArtist;
-                            const featMatch = song.rawArtist.match(/(.*?)\s(?:ft\.|feat\.)\s/i);
-                            if (featMatch && featMatch[1]) {
-                                displayArtist = featMatch[1].trim(); // Take part before 'ft.' or 'feat.'
-                            } else {
-                                // Also consider splitting by comma or semicolon for display if multiple are listed
-                                const artistsArray = song.rawArtist.split(/[,;]/).map(a => a.trim()).filter(a => a);
-                                if (artistsArray.length > 0) {
-                                    displayArtist = artistsArray[0]; // Take only the first artist for display
-                                }
-                            }
-                            song.displayArtist = displayArtist; // Store for display
+                    await new Promise(resolve => {
+                        window.jsmediatags.read(file, {
+                            onSuccess: (tag) => {
+                                song.title = tag.tags.title || tag.tags.album || song.title;
+                                song.rawArtist = tag.tags.artist || 'Unknown Artist';
 
-                            if (tag.tags.picture) {
-                                const { data, format } = tag.tags.picture;
-                                let base64String = "";
-                                for (let i = 0; i < data.length; i++) {
-                                    base64String += String.fromCharCode(data[i]);
+                                let displayArtist = song.rawArtist;
+                                const featMatch = song.rawArtist.match(/(.*?)\s(?:ft\.|feat\.)\s/i);
+                                if (featMatch && featMatch[1]) {
+                                    displayArtist = featMatch[1].trim();
+                                } else {
+                                    const artistsArray = song.rawArtist.split(/[,;]|\s\/\s/).map(a => a.trim()).filter(a => a);
+                                    if (artistsArray.length > 0) {
+                                        displayArtist = artistsArray[0];
+                                    }
                                 }
-                                song.albumArt = `data:${format};base64,${window.btoa(base64String)}`;
+                                song.displayArtist = displayArtist;
+
+                                if (tag.tags.picture) {
+                                    const { data, format } = tag.tags.picture;
+                                    let base64String = "";
+                                    for (let i = 0; i < data.length; i++) {
+                                        base64String += String.fromCharCode(data[i]);
+                                    }
+                                    song.albumArt = `data:${format};base64,${window.btoa(base64String)}`;
+                                }
+                                resolve();
+                            },
+                            onError: (error) => {
+                                console.log("Error reading tags for file:", file.name, error);
+                                resolve();
                             }
-                            updatePlaylistUI();
-                            if(index === currentTrackIndex) {
-                                loadTrack(currentTrackIndex, false); // Reload to update UI with tags if needed
-                            }
-                        },
-                        onError: (error) => {
-                            console.log("Error reading tags for file:", file.name, error);
-                            updatePlaylistUI(); // Still update playlist even if tags fail
-                            if(index === currentTrackIndex) {
-                                loadTrack(currentTrackIndex, false);
-                            }
-                        }
+                        });
                     });
-                });
-
-                if (playlist.length > 0) {
-                    currentTrackIndex = 0;
-                    updatePlaylistUI();
-                    loadTrack(0, false);
-                } else {
-                    if (playlistPlaceholder) playlistPlaceholder.style.display = 'flex'; // Show placeholder if no files loaded
                 }
-                updateTopListsUI(); // Update top lists after loading new songs
+
+                playlist = newSongs;
+                currentTrackIndex = 0;
+                if (isShuffling) {
+                    originalPlaylistOrder = Array.from({ length: playlist.length }, (_, i) => i);
+                    shuffledPlaylistIndices = shuffleArray(Array.from({ length: playlist.length }, (_, i) => i));
+                    currentTrackIndex = shuffledPlaylistIndices[0] || 0;
+                } else {
+                     originalPlaylistOrder = Array.from({ length: playlist.length }, (_, i) => i);
+                     shuffledPlaylistIndices = [];
+                }
+
+                updatePlaylistUI();
+                loadTrack(currentTrackIndex, false);
+                updateTopListsUI();
+                await saveUserData();
             }
 
             // --- UI Updates ---
             function updatePlaylistUI() {
-                if (!playlistElement) return; // Ensure playlistElement exists
+                if (!playlistElement) return;
 
                 playlistElement.innerHTML = '';
                 if (playlist.length === 0) {
@@ -754,20 +1169,21 @@
                     if (playlistPlaceholder) playlistPlaceholder.style.display = 'none';
                 }
 
-                playlist.forEach((song, index) => {
-                    const li = document.createElement('div');
-                    li.className = `playlist-item p-3 rounded-lg cursor-pointer flex items-center space-x-4 transition duration-200 hover:bg-white hover:bg-opacity-10 ${index === currentTrackIndex ? 'bg-indigo-500 bg-opacity-40' : ''}`;
-                    li.setAttribute('draggable', 'true'); // Make playlist items draggable
-                    li.dataset.index = index; // Store current index for drag and drop
+                const currentRenderPlaylist = isShuffling ? shuffledPlaylistIndices.map(idx => playlist[idx]) : playlist;
 
-                    // Adjust text color for light mode if necessary
+                currentRenderPlaylist.forEach((song, index) => {
+                    const isCurrent = (isShuffling && index === currentTrackIndex) || (!isShuffling && index === currentTrackIndex);
+
+                    const li = document.createElement('div');
+                    li.className = `playlist-item p-3 rounded-lg cursor-pointer flex items-center space-x-4 transition duration-200 hover:bg-white hover:bg-opacity-10 ${isCurrent ? 'bg-indigo-500 bg-opacity-40' : ''}`;
+                    li.setAttribute('draggable', 'true');
+                    li.dataset.index = index; 
+
                     if (currentMode === 'light') {
-                         li.classList.add('text-black'); // Default text for list items
-                         // Ensure text-white is removed if it was there from previous state
+                         li.classList.add('text-black');
                          if (li.classList.contains('text-white')) li.classList.remove('text-white');
                     } else {
                         li.classList.add('text-white');
-                        // Ensure text-black is removed if it was there from previous state
                         if (li.classList.contains('text-black')) li.classList.remove('text-black');
                     }
                     
@@ -782,26 +1198,23 @@
                     `;
                     li.addEventListener('click', () => {
                         currentTrackIndex = index;
-                        loadTrack(currentTrackIndex, true);
+                        loadTrack(currentTrackIndex, true); // Play immediately on click
                     });
                     playlistElement.appendChild(li);
                 });
             }
 
-            // New: Function to update Top Songs and Top Artists lists
             function updateTopListsUI() {
-                if (!topSongsList || !topArtistsList) return; // Ensure elements exist
+                if (!topSongsList || !topArtistsList) return;
 
-                // Get Top 5 Songs
-                // Create a copy of the playlist to sort without modifying the original order
+                // FIX: Removed extra dot after `playlist]`
                 const sortedSongs = [...playlist].sort((a, b) => b.playCount - a.playCount);
                 const top5Songs = sortedSongs.slice(0, 5);
 
-                topSongsList.innerHTML = ''; // Clear previous list
+                topSongsList.innerHTML = '';
                 if (top5Songs.length > 0 && top5Songs[0].playCount > 0) {
                     top5Songs.forEach(song => {
                         const li = document.createElement('li');
-                        // Apply appropriate text color based on current mode
                         li.className = currentMode === 'light' ? 'text-gray-700' : 'text-gray-300';
                         li.textContent = `${song.title} (${song.playCount} plays)`;
                         topSongsList.appendChild(li);
@@ -813,16 +1226,13 @@
                     topSongsList.appendChild(li);
                 }
 
-                // Get Top 5 Artists
-                // Convert Map entries to an array for sorting
                 const sortedArtists = [...artistPlayCounts.entries()].sort((a, b) => b[1] - a[1]);
                 const top5Artists = sortedArtists.slice(0, 5);
 
-                topArtistsList.innerHTML = ''; // Clear previous list
+                topArtistsList.innerHTML = '';
                 if (top5Artists.length > 0 && top5Artists[0][1] > 0) {
                     top5Artists.forEach(([artist, count]) => {
                         const li = document.createElement('li');
-                        // Apply appropriate text color based on current mode
                         li.className = currentMode === 'light' ? 'text-gray-700' : 'text-gray-300';
                         li.textContent = `${artist} (${count} plays)`;
                         topArtistsList.appendChild(li);
@@ -835,57 +1245,165 @@
                 }
             }
 
+            function updateRepeatButtonUI() {
+                if (repeatIconOff) repeatIconOff.classList.add('hidden');
+                if (repeatIconAll) repeatIconAll.classList.add('hidden');
+                if (repeatIconOne) repeatIconOne.classList.add('hidden');
 
-            function loadTrack(index, shouldPlay = true) {
-                const track = playlist[index];
-                if (!track) return;
-
-                playWhenReady = shouldPlay;
-
-                if (albumArt) albumArt.src = track.albumArt;
-                if (songTitle) songTitle.textContent = track.title;
-                if (songArtist) songArtist.textContent = track.displayArtist; // Use displayArtist here
-                if (audioPlayer) audioPlayer.src = track.url;
-                
-                // Only update background if in dynamic mode
-                if (currentMode === 'dynamic' && appBackground) {
-                    appBackground.style.backgroundImage = `url('${track.albumArt}')`;
+                if (repeatMode === 0) {
+                    if (repeatIconOff) repeatIconOff.classList.remove('hidden');
+                    if (repeatBtn) repeatBtn.classList.remove('text-indigo-400');
+                    if (repeatBtn) repeatBtn.classList.add('text-gray-400');
+                } else if (repeatMode === 1) {
+                    if (repeatIconAll) repeatIconAll.classList.remove('hidden');
+                    if (repeatBtn) repeatBtn.classList.remove('text-gray-400');
+                    if (repeatBtn) repeatBtn.classList.add('text-indigo-400');
+                } else if (repeatMode === 2) {
+                    if (repeatIconOne) repeatIconOne.classList.remove('hidden');
+                    if (repeatBtn) repeatBtn.classList.remove('text-gray-400');
+                    if (repeatBtn) repeatBtn.classList.add('text-indigo-400');
                 }
-                
-                updatePlaylistUI(); // Re-render playlist to highlight current track
             }
 
-            // --- Playback Controls ---
+            function updateShuffleButtonUI() {
+                if (shuffleIcon) {
+                    if (isShuffling) {
+                        shuffleIcon.classList.remove('text-gray-400');
+                        shuffleIcon.classList.add('text-indigo-400');
+                    } else {
+                        shuffleIcon.classList.remove('text-indigo-400');
+                        shuffleIcon.classList.add('text-gray-400');
+                    }
+                }
+            }
+
+
+            function loadTrack(index, shouldPlay = true) {
+                const trackToLoad = isShuffling ? playlist[shuffledPlaylistIndices[index]] : playlist[index];
+                
+                if (!trackToLoad) return;
+
+                if (albumArt) albumArt.src = trackToLoad.albumArt;
+                if (songTitle) songTitle.textContent = trackToLoad.title;
+                if (songArtist) songArtist.textContent = trackToLoad.displayArtist;
+                
+                if (audioPlayer) {
+                    audioPlayer.pause(); // Always pause current playback when loading new track
+                    audioPlayer.src = trackToLoad.url;
+                    audioPlayer.load(); // Explicitly load the new source
+                    audioPlayer.currentTime = 0; // Reset time for new song
+
+                    // Update isPlaying state and UI immediately
+                    isPlaying = shouldPlay;
+                    if (shouldPlay) {
+                        if (playIcon) playIcon.classList.add('hidden');
+                        if (pauseIcon) pauseIcon.classList.remove('hidden');
+                        // Attempt to play immediately. If blocked by autoplay policy, loadedmetadata will retry.
+                        audioPlayer.play().catch(e => {
+                            console.warn("Autoplay blocked, waiting for loadedmetadata or user interaction:", e);
+                            // Keep isPlaying true, the loadedmetadata listener will try again
+                        });
+                    } else {
+                        if (playIcon) playIcon.classList.remove('hidden');
+                        if (pauseIcon) pauseIcon.classList.add('hidden');
+                    }
+                } else {
+                    console.warn("Cannot play song: Audio file not loaded. Please re-select files from your device.");
+                }
+                
+                if (currentMode === 'dynamic' && appBackground) {
+                    appBackground.style.backgroundImage = `url('${trackToLoad.albumArt}')`;
+                }
+                
+                updatePlaylistUI();
+            }
+
+            async function handleSongEnd() {
+                if (repeatMode === 2) { // Repeat one
+                    audioPlayer.currentTime = 0;
+                    playSong();
+                } else if (repeatMode === 1) { // Repeat all
+                    let nextIndex = currentTrackIndex;
+                    if (isShuffling) {
+                        nextIndex = (currentTrackIndex + 1) % shuffledPlaylistIndices.length;
+                    } else {
+                        nextIndex = (currentTrackIndex + 1) % playlist.length;
+                    }
+                    currentTrackIndex = nextIndex;
+                    loadTrack(currentTrackIndex, true);
+                } else { // No repeat
+                    let nextIndex = currentTrackIndex;
+                    if (isShuffling) {
+                        nextIndex = (currentTrackIndex + 1);
+                        if (nextIndex >= shuffledPlaylistIndices.length) {
+                            pauseSong();
+                            currentTrackIndex = 0;
+                            updatePlaylistUI();
+                            return;
+                        }
+                    } else {
+                        nextIndex = (currentTrackIndex + 1);
+                        if (nextIndex >= playlist.length) {
+                            pauseSong();
+                            currentTrackIndex = 0;
+                            updatePlaylistUI();
+                            return;
+                        }
+                    }
+                    currentTrackIndex = nextIndex;
+                    loadTrack(currentTrackIndex, true);
+                }
+                await saveUserData();
+            }
+
             function togglePlayPause() {
-                if (playlist.length === 0) return;
+                if (playlist.length === 0) {
+                    console.warn("No songs in playlist to play.");
+                    return;
+                }
+                const currentSongActual = isShuffling ? playlist[shuffledPlaylistIndices[currentTrackIndex]] : playlist[currentTrackIndex];
+
+                if (!currentSongActual || !currentSongActual.url) {
+                    console.warn("Current song's audio file is not loaded. Please re-select files.");
+                    return;
+                }
                 isPlaying ? pauseSong() : playSong();
             }
 
-            function playSong() {
-                isPlaying = true;
-                if (audioPlayer) audioPlayer.play().catch(e => console.error("Playback error:", e));
-                if (playIcon) playIcon.classList.add('hidden');
-                if (pauseIcon) pauseIcon.classList.remove('hidden');
+            async function playSong() {
+                if (audioPlayer) {
+                    try {
+                        await audioPlayer.play();
+                        isPlaying = true; // Set state after successful play
+                        if (playIcon) playIcon.classList.add('hidden');
+                        if (pauseIcon) pauseIcon.classList.remove('hidden');
 
-                // Increment play count for the current song
-                if (playlist[currentTrackIndex]) {
-                    playlist[currentTrackIndex].playCount = (playlist[currentTrackIndex].playCount || 0) + 1;
+                        const currentSongActual = isShuffling ? playlist[shuffledPlaylistIndices[currentTrackIndex]] : playlist[currentTrackIndex];
 
-                    // Increment play count for all artists in rawArtist string
-                    const currentSong = playlist[currentTrackIndex];
-                    if (currentSong.rawArtist && currentSong.rawArtist !== 'Unknown Artist') {
-                        // Split artist string by common delimiters (comma, semicolon, ' ft. ', ' feat. ', ' / ') and trim spaces
-                        const artists = currentSong.rawArtist.split(/[,;]|\s(?:ft\.|feat\.)\s|\s\/\s/).map(a => a.trim()).filter(a => a);
-                        artists.forEach(artist => {
-                            artistPlayCounts.set(artist, (artistPlayCounts.get(artist) || 0) + 1);
-                        });
+                        if (currentSongActual) {
+                            currentSongActual.playCount = (currentSongActual.playCount || 0) + 1;
+
+                            if (currentSongActual.rawArtist && currentSongActual.rawArtist !== 'Unknown Artist') {
+                                const artists = currentSongActual.rawArtist.split(/[,;]|\s(?:ft\.|feat\.)\s|\s\/\s/).map(a => a.trim()).filter(a => a);
+                                artists.forEach(artist => {
+                                    artistPlayCounts.set(artist, (artistPlayCounts.get(artist) || 0) + 1);
+                                });
+                            }
+                        }
+                        updateTopListsUI();
+                        saveUserData();
+                    } catch (e) {
+                        console.error("Playback error:", e);
+                        isPlaying = false; // Set state to false if play fails
+                        if (playIcon) playIcon.classList.remove('hidden');
+                        if (pauseIcon) pauseIcon.classList.add('hidden');
+                        alert("Playback failed. Please interact with the player first (e.g., click play) or check browser autoplay settings.");
                     }
                 }
-                updateTopListsUI(); // Update top lists after playing a song
             }
 
             function pauseSong() {
-                isPlaying = false;
+                isPlaying = false; // Set state before pausing
                 if (audioPlayer) audioPlayer.pause();
                 if (playIcon) playIcon.classList.remove('hidden');
                 if (pauseIcon) pauseIcon.classList.add('hidden');
@@ -893,23 +1411,54 @@
             
             function playNext() {
                 if (playlist.length === 0) return;
-                currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
+                let nextIndex = currentTrackIndex;
+                if (isShuffling) {
+                    nextIndex = (currentTrackIndex + 1) % shuffledPlaylistIndices.length;
+                    if (nextIndex === 0 && repeatMode !== 1) {
+                        pauseSong();
+                        currentTrackIndex = 0;
+                        updatePlaylistUI();
+                        return;
+                    }
+                } else {
+                    nextIndex = (currentTrackIndex + 1) % playlist.length;
+                    if (nextIndex === 0 && repeatMode !== 1) {
+                        pauseSong();
+                        currentTrackIndex = 0;
+                        updatePlaylistUI();
+                        return;
+                    }
+                }
+                currentTrackIndex = nextIndex;
                 loadTrack(currentTrackIndex, true);
             }
 
             function playPrevious() {
                 if (playlist.length === 0) return;
-                currentTrackIndex = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+                let prevIndex = currentTrackIndex;
+                if (isShuffling) {
+                    prevIndex = (currentTrackIndex - 1 + shuffledPlaylistIndices.length) % shuffledPlaylistIndices.length;
+                } else {
+                    prevIndex = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+                }
+                currentTrackIndex = prevIndex;
                 loadTrack(currentTrackIndex, true);
             }
 
             // --- Progress & Time ---
             function updateProgress(e) {
                 const { duration, currentTime } = e.srcElement;
-                if(duration && progressBar && currentTimeEl){
-                    const progressPercent = (currentTime / duration) * 100;
-                    progressBar.style.width = `${progressPercent}%`;
+                if (progressBar && currentTimeEl && durationEl) {
                     currentTimeEl.textContent = formatTime(currentTime);
+
+                    if (!isNaN(duration) && isFinite(duration) && duration > 0) {
+                        durationEl.textContent = formatTime(duration);
+                        const progressPercent = (currentTime / duration) * 100;
+                        progressBar.style.width = `${progressPercent}%`;
+                    } else {
+                        durationEl.textContent = '0:00';
+                        progressBar.style.width = '0%';
+                    }
                 }
             }
             
