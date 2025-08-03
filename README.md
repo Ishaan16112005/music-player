@@ -1,2 +1,2 @@
 # music-player
-a minimal music player with a cool UI.
+a music player with glassmorphic ui
